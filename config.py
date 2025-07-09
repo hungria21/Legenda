@@ -2,7 +2,7 @@
 # Configurações do Bot de Legendas do Telegram
 
 # Token do bot obtido do BotFather
-BOT_TOKEN = "7392683928:AAHV1jHx6W7KDeMOAlyl6c3lZDQgyXdDofE"
+BOT_TOKEN = ""
 
 # Configurações opcionais
 MAX_FILES_PER_SESSION = 10
