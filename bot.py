@@ -271,6 +271,14 @@ def collect_media(message, user_id):
 def process_media_files(chat_id, user_id):
     """Processa e reenvia arquivos com legendas já incluídas"""
     data = get_user_data(user_id)
+
+    # Evitar processamento duplicado devido a race conditions
+    if data['state'] == PROCESSING:
+        logger.warning(
+            f"User {user_id}: process_media_files chamado enquanto já estava em estado de PROCESSAMENTO. "
+            "Isso pode ser uma race condition benigna. Ignorando esta chamada."
+        )
+        return
     
     if data['media_count'] == 0:
         return
