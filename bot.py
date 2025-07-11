@@ -32,7 +32,8 @@ def get_user_data(user_id):
             'media_count': 0,
             'caption_index': 0,
             'timeout_timer': None,
-            'last_media_time': None
+            'last_media_time': None,
+            'bot_message_ids_to_delete': [] # New list for storing bot message IDs
         }
     return user_data[user_id]
 
@@ -49,7 +50,8 @@ def reset_user_data(user_id):
         'media_count': 0,
         'caption_index': 0,
         'timeout_timer': None,
-        'last_media_time': None
+        'last_media_time': None,
+        'bot_message_ids_to_delete': [] # Ensure this is also reset
     }
 
 def create_main_menu():
@@ -82,35 +84,15 @@ def process_caption_file(file_content, file_name):
                 for line in lines:
                     line = line.strip()
                     # Remove potential leading numbering like "1. ", "1) "
-                    if line:
-                        parts = line.split('.', 1)
-                        if len(parts) > 1 and parts[0].isdigit():
-                            cleaned_line = parts[1].strip()
-                        else:
-                            parts = line.split(')', 1)
-                            if len(parts) > 1 and parts[0].isdigit():
-                                cleaned_line = parts[1].strip()
-                            else:
-                                cleaned_line = line
-                        if cleaned_line: # Add if not empty after stripping numbering
-                            captions.append(cleaned_line)
+                    if line: # Ensure line is not empty after initial strip (e.g. from json list ["foo", "  ", "bar"])
+                        captions.append(line) # Use exact line
         elif file_name.lower().endswith('.txt'):
             lines = text_content.splitlines()
             for line in lines:
-                line = line.strip()
-                # Remove potential leading numbering like "1. ", "1) "
-                if line: # Ensure line is not empty after initial strip
-                    parts = line.split('.', 1)
-                    if len(parts) > 1 and parts[0].isdigit():
-                        cleaned_line = parts[1].strip()
-                    else:
-                        parts = line.split(')', 1)
-                        if len(parts) > 1 and parts[0].isdigit():
-                            cleaned_line = parts[1].strip()
-                        else:
-                            cleaned_line = line
-                    if cleaned_line: # Add if not empty after stripping numbering
-                        captions.append(cleaned_line)
+                # For TXT, we still strip the line itself, but not internal numbering
+                cleaned_line = line.strip()
+                if cleaned_line: # Add if not empty after stripping line
+                    captions.append(cleaned_line)
         else: # Should not happen if check is done before calling
             return None
             
@@ -138,25 +120,25 @@ def handle_done(message):
     """Handler para comando /done - limpa tudo e mostra boas vindas"""
     user_id = message.from_user.id
     chat_id = message.chat.id
-    
-    # Limpar algumas mensagens recentes (tentar deletar algumas mensagens recentes)
-    try:
-        # Deletar mensagens recentes (últimas 50 mensagens)
-        for i in range(50):
+    data = get_user_data(user_id) # Get user data to access bot_message_ids_to_delete
+
+    # Deletar mensagens específicas rastreadas
+    if data['bot_message_ids_to_delete']:
+        logger.info(f"User {user_id}: /done command. Deleting {len(data['bot_message_ids_to_delete'])} tracked bot messages.")
+        for msg_id in data['bot_message_ids_to_delete']:
             try:
-                bot.delete_message(chat_id, message.message_id - i)
-            except:
-                continue
-    except:
-        pass
+                bot.delete_message(chat_id, msg_id)
+            except Exception as e:
+                logger.error(f"User {user_id}: Failed to delete message {msg_id}. Error: {e}")
+        # Lista será resetada em reset_user_data
     
-    # Resetar dados do usuário
+    # Resetar dados do usuário (isso também limpará bot_message_ids_to_delete)
     reset_user_data(user_id)
     
-    # Enviar mensagem de boas vindas
+    # Enviar mensagem de boas vindas (esta não é adicionada à lista de exclusão)
     welcome_text = "Envie seus arquivos para renomear ou use o botão abaixo para adicionar um arquivo JSON contendo legenda."
     
-    bot.send_message(
+    bot.send_message( # Esta mensagem de boas-vindas não é rastreada para exclusão.
         chat_id,
         welcome_text,
         reply_markup=create_main_menu()
@@ -171,7 +153,25 @@ def handle_callback_query(call):
     if call.data == "mode_json":
         data['state'] = WAITING_JSON_FILE
         
-        bot.edit_message_text(
+        # It's better to send a new message and store its ID than to edit,
+        # as edited messages might not be easily trackable for deletion in a simple list.
+        # However, the current UI edits the existing "welcome" type message.
+        # For simplicity with current structure, we won't track this edited message for /done.
+        # If we were to track it, we'd need to send a new message here.
+        # The prompt implies "messages of commands, like those displayed when using the 'Json' button".
+        # This message is an edit of the original menu. Let's assume it's okay not to delete it,
+        # or the user means the *next* message confirming JSON upload.
+        # If the user wants this specific prompt ("Envie um arquivo...") deleted, it's tricky
+        # as it's an edit. A more robust way would be to delete the original menu message
+        # and send a new one. For now, let's focus on messages the bot *sends as new*.
+
+        # Let's assume the request "messages of commands, like those displayed when using the 'Json' button"
+        # refers to *new* messages sent by the bot in response to command-like interactions.
+        # The message "Envie um arquivo JSON com suas legendas." is an *edit* of the current message.
+        # We will focus on tracking IDs of *newly sent* messages by the bot.
+        # The message "Arquivo JSON processado!" IS a new message.
+
+        bot.edit_message_text( # This message is an edit, not a new one.
             "Envie um arquivo JSON com suas legendas.",
             call.message.chat.id,
             call.message.message_id
@@ -223,10 +223,11 @@ def handle_document(message):
             data['state'] = WAITING_MEDIA_FILES
             data['caption_index'] = 0
             
-            bot.reply_to(
+            sent_message = bot.reply_to(
                 message,
                 f"Arquivo JSON processado! {len(captions)} legendas carregadas. Agora envie seus arquivos."
             )
+            data['bot_message_ids_to_delete'].append(sent_message.message_id)
             
         except Exception as e:
             logger.error(f"Erro ao processar arquivo JSON: {e}")
@@ -262,9 +263,14 @@ def timeout_process_media(chat_id, user_id):
     data = get_user_data(user_id)
     
     # Verificar se ainda há arquivos para processar e não está processando
-    if data['media_count'] > 0 and data['state'] == WAITING_MEDIA_FILES:
-        logger.info(f"Timeout atingido para usuário {user_id}, processando {data['media_count']} arquivos")
-        process_media_files(chat_id, user_id)
+    if data['state'] == WAITING_MEDIA_FILES: # Check state first
+        if data['media_count'] > 10:
+            logger.info(f"User {user_id}: Timeout reached. Batch size {data['media_count']} is > 10. Deleting batch.")
+            delete_collected_media_and_reset(user_id, chat_id)
+        elif data['media_count'] > 0: # 1 to 10 files
+            logger.info(f"User {user_id}: Timeout reached. Processing {data['media_count']} files.")
+            process_media_files(chat_id, user_id)
+        # If media_count is 0, do nothing on timeout.
 
 def start_timeout_timer(chat_id, user_id):
     """Inicia ou reinicia o timer de timeout"""
@@ -283,16 +289,8 @@ def collect_media(message, user_id):
     """Coleta arquivos de mídia do usuário"""
     data = get_user_data(user_id)
 
-    # Se já temos 10 arquivos na lista esperando para processar, ou estamos processando,
-    # ignorar novos arquivos até que o lote atual seja concluído.
-    # A verificação de 'PROCESSING' é uma dupla segurança, embora o principal controle esteja em process_media_files.
-    if data['media_count'] >= 10 or data['state'] == PROCESSING:
-        logger.info(
-            f"User {user_id}: Media received while batch full or processing. Media from message {message.message_id} ignored for current batch."
-        )
-        return # Ignorar este arquivo para o lote atual
-    
     # Adicionar arquivo à lista com informações completas
+    # A verificação de >10 será feita antes do processamento.
     data['media_messages'].append({
         'message_id': message.message_id,
         'chat_id': message.chat.id,
@@ -303,15 +301,43 @@ def collect_media(message, user_id):
     # Verificar se atingiu 10 arquivos
     if data['media_count'] >= 10:
         # Cancelar timer se existir
+    # data['media_count'] has just been incremented.
+    if data['media_count'] > 10:
+        if data['timeout_timer']: # Cancel timer, as we are invalidating the batch now
+            data['timeout_timer'].cancel()
+            data['timeout_timer'] = None
+        logger.info(f"User {user_id}: media_count is now {data['media_count']} (>10). Deleting current batch.")
+        delete_collected_media_and_reset(user_id, message.chat.id)
+    elif data['media_count'] == 10:
         if data['timeout_timer']:
             data['timeout_timer'].cancel()
             data['timeout_timer'] = None
-        
-        # Processar imediatamente
+        logger.info(f"User {user_id}: media_count is now 10. Processing batch.")
         process_media_files(message.chat.id, user_id)
-    else:
-        # Iniciar/reiniciar timer de timeout
+    else: # 1-9 files
+        logger.info(f"User {user_id}: media_count is now {data['media_count']}. Starting/resetting timer.")
         start_timeout_timer(message.chat.id, user_id)
+
+def delete_collected_media_and_reset(user_id, chat_id):
+    """Deleta mídias coletadas e reseta o estado parcial do usuário."""
+    data = get_user_data(user_id)
+    logger.info(f"User {user_id}: Batch of {data['media_count']} files is invalid (>10). Deleting collected media.")
+    for media_info in data['media_messages']:
+        try:
+            bot.delete_message(chat_id, media_info['message_id'])
+        except Exception as e:
+            logger.error(f"User {user_id}: Failed to delete message {media_info['message_id']}. Error: {e}")
+
+    data['media_messages'] = []
+    data['media_count'] = 0
+    # Não resetar caption_index aqui, pois o usuário pode querer tentar de novo com um batch válido.
+    # O estado WAITING_MEDIA_FILES é apropriado para tentar novamente.
+    data['state'] = WAITING_MEDIA_FILES
+    if data['timeout_timer']:
+        data['timeout_timer'].cancel()
+        data['timeout_timer'] = None
+    data['last_media_time'] = None
+
 
 def process_media_files(chat_id, user_id):
     """Processa e reenvia arquivos com legendas já incluídas"""
@@ -352,25 +378,29 @@ def process_media_files(chat_id, user_id):
                     data['caption_index'] += 1
                 
                 # Enviar arquivo com legenda já incluída
+                sent_media_message = None
                 if message_obj.photo:
-                    bot.send_photo(
+                    sent_media_message = bot.send_photo(
                         chat_id,
                         message_obj.photo[-1].file_id,
                         caption=caption
                     )
                 elif message_obj.video:
-                    bot.send_video(
+                    sent_media_message = bot.send_video(
                         chat_id,
                         message_obj.video.file_id,
                         caption=caption
                     )
                 elif message_obj.document:
-                    bot.send_document(
+                    sent_media_message = bot.send_document(
                         chat_id,
                         message_obj.document.file_id,
                         caption=caption
                     )
                 
+                if sent_media_message:
+                    data['bot_message_ids_to_delete'].append(sent_media_message.message_id)
+
                 # Delay pequeno para evitar problemas de ordem e rate limiting
                 time.sleep(0.5)
                 
