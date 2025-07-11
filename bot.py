@@ -63,24 +63,60 @@ def create_main_menu():
     )
     return markup
 
-def process_json_file(file_content):
-    """Processa arquivo JSON e retorna lista de legendas"""
+def process_caption_file(file_content, file_name):
+    """Processa arquivo de legendas (JSON ou TXT) e retorna lista de legendas"""
     try:
-        # Decodificar conteúdo
         text_content = file_content.decode('utf-8')
-        
-        # Parse JSON
-        data = json.loads(text_content)
-        
-        # Verificar se é uma lista
-        if isinstance(data, list):
-            # Filtrar itens vazios
-            captions = [str(item).strip() for item in data if str(item).strip()]
-            return captions
-        else:
+        captions = []
+
+        if file_name.lower().endswith('.json'):
+            try:
+                data = json.loads(text_content)
+                if isinstance(data, list):
+                    captions = [str(item).strip() for item in data if str(item).strip()]
+                else: # JSON is not a list
+                    return None
+            except json.JSONDecodeError:
+                # If JSON parsing fails, try to parse as plain text as a fallback for .json files
+                lines = text_content.splitlines()
+                for line in lines:
+                    line = line.strip()
+                    # Remove potential leading numbering like "1. ", "1) "
+                    if line:
+                        parts = line.split('.', 1)
+                        if len(parts) > 1 and parts[0].isdigit():
+                            cleaned_line = parts[1].strip()
+                        else:
+                            parts = line.split(')', 1)
+                            if len(parts) > 1 and parts[0].isdigit():
+                                cleaned_line = parts[1].strip()
+                            else:
+                                cleaned_line = line
+                        if cleaned_line: # Add if not empty after stripping numbering
+                            captions.append(cleaned_line)
+        elif file_name.lower().endswith('.txt'):
+            lines = text_content.splitlines()
+            for line in lines:
+                line = line.strip()
+                # Remove potential leading numbering like "1. ", "1) "
+                if line: # Ensure line is not empty after initial strip
+                    parts = line.split('.', 1)
+                    if len(parts) > 1 and parts[0].isdigit():
+                        cleaned_line = parts[1].strip()
+                    else:
+                        parts = line.split(')', 1)
+                        if len(parts) > 1 and parts[0].isdigit():
+                            cleaned_line = parts[1].strip()
+                        else:
+                            cleaned_line = line
+                    if cleaned_line: # Add if not empty after stripping numbering
+                        captions.append(cleaned_line)
+        else: # Should not happen if check is done before calling
             return None
             
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        return captions if captions else None
+
+    except UnicodeDecodeError:
         return None
 
 @bot.message_handler(commands=['start'])
@@ -153,10 +189,10 @@ def handle_document(message):
         # Processar arquivo JSON de legendas
         file_name = message.document.file_name
         
-        if not file_name.lower().endswith('.json'):
+        if not (file_name.lower().endswith('.json') or file_name.lower().endswith('.txt')):
             bot.reply_to(
                 message,
-                "Por favor, envie um arquivo JSON válido."
+                "Por favor, envie um arquivo JSON ou TXT válido."
             )
             return
         
@@ -166,12 +202,12 @@ def handle_document(message):
             downloaded_file = bot.download_file(file_info.file_path)
             
             # Processar legendas
-            captions = process_json_file(downloaded_file)
+            captions = process_caption_file(downloaded_file, file_name)
             
             if captions is None:
                 bot.reply_to(
                     message,
-                    "Erro ao ler arquivo JSON. Certifique-se de que é um arquivo JSON válido."
+                    "Erro ao ler arquivo de legendas. Certifique-se de que é um arquivo JSON ou TXT válido e não está vazio."
                 )
                 return
             
@@ -246,6 +282,15 @@ def start_timeout_timer(chat_id, user_id):
 def collect_media(message, user_id):
     """Coleta arquivos de mídia do usuário"""
     data = get_user_data(user_id)
+
+    # Se já temos 10 arquivos na lista esperando para processar, ou estamos processando,
+    # ignorar novos arquivos até que o lote atual seja concluído.
+    # A verificação de 'PROCESSING' é uma dupla segurança, embora o principal controle esteja em process_media_files.
+    if data['media_count'] >= 10 or data['state'] == PROCESSING:
+        logger.info(
+            f"User {user_id}: Media received while batch full or processing. Media from message {message.message_id} ignored for current batch."
+        )
+        return # Ignorar este arquivo para o lote atual
     
     # Adicionar arquivo à lista com informações completas
     data['media_messages'].append({
