@@ -298,9 +298,6 @@ def collect_media(message, user_id):
     })
     data['media_count'] += 1
     
-    # Verificar se atingiu 10 arquivos
-    if data['media_count'] >= 10:
-        # Cancelar timer se existir
     # data['media_count'] has just been incremented.
     if data['media_count'] > 10:
         if data['timeout_timer']: # Cancel timer, as we are invalidating the batch now
